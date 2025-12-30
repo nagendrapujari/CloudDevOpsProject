@@ -1,0 +1,49 @@
+#!/bin/bash
+
+# Configuration
+CLI="/opt/wildfly/bin/jboss-cli.sh --connect --controller=${option.DC_IP}:9990"
+ACTION="@option.ACTION@"
+SCOPE="@option.SCOPE@"
+CLUSTER="@option.CLUSTER_NAME@"
+
+echo "--- DOMAIN DISCOVERY ---"
+AVAILABLE_CLUSTERS=$($CLI --command="ls /server-group" | tr -d '\r')
+echo "Available Clusters in WildFly: $AVAILABLE_CLUSTERS"
+echo "Targeting Cluster from Rundeck: $CLUSTER"
+
+if [[ ! " $AVAILABLE_CLUSTERS " =~ " $CLUSTER " ]]; then
+    echo "ERROR: Cluster '$CLUSTER' not found in WildFly! Please check case sensitivity."
+    exit 1
+fi
+
+if [ "$SCOPE" == "Cluster" ]; then
+    echo -e "\n--- EXECUTING $ACTION ---"
+    $CLI --command="/server-group=$CLUSTER:$ACTION-servers"
+    
+    TARGET_ST="STARTED"; [ "$ACTION" == "stop" ] && TARGET_ST="STOPPED"
+    
+    COUNT=0
+    while [ $COUNT -lt 12 ]; do
+        # Robust status check: Grabs the block for the cluster and counts statuses
+        DATA=$($CLI --command="/host=*/server-config=*:read-resource(include-runtime=true)")
+        
+        # Count how many total servers exist for this cluster
+        TOTAL=$(echo "$DATA" | grep -c "group\" => \"$CLUSTER\"")
+        # Count how many match the target state
+        CURRENT=$(echo "$DATA" | grep -B 2 "group\" => \"$CLUSTER\"" | grep -c "status\" => \"$TARGET_ST\"")
+
+        echo "Progress: $CURRENT of $TOTAL servers are $TARGET_ST"
+
+        if [ "$CURRENT" -eq "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then
+            echo "SUCCESS: Cluster $CLUSTER is now $TARGET_ST."
+            exit 0
+        fi
+        sleep 10
+        ((COUNT++))
+    done
+    echo "TIMEOUT: Cluster did not reach $TARGET_ST."
+    exit 1
+else
+    # Individual Server Logic
+    $CLI --command="/host=@option.TARGET_HOST@/server-config=@option.SERVER_NAME@:$ACTION(blocking=true)"
+fi
